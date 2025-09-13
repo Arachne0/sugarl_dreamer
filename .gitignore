@@ -1,7 +1,5 @@
 # SUGARL
 .vscode
-_doc/
-common/
 
 */__pycache__
 *.pyc
