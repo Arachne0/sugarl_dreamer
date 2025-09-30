@@ -21,12 +21,27 @@ main working directory는 agent_dreamer 폴더이며, agent 는 기존에 SUGARL
 
 ### Must be fixed 🛠️ 
 
-제가 main branch의 dreamerv3-torch/dreamer.py 파일에서 
-configs_path = Path("/home/hail/SH/sugarl/dreamerv3-torch/configs.yaml")
-
-이 줄에서 절대 경로로 넣어서 configs_path를 여러분들의 코드 위치로 변경해주셔야 합니다. 추후에 수정하겠지만 아마 main branch가 update 되지 않았을 수 있어 양해부탁드립니다.
+1. 현재 dreamer 의 network를 수정해서 84,84,1 가 제대로 돌아가도록 수정해놓았는데, frame 4개 쌓은 84, 84, 4 여야함. 
 
 
+
+2. dreamer.py 디버깅 중에  지금은 config.task 를 "atari_pong" 으로 configs.yaml에서 고정시켜서 아마 이것만 할텐데
+합칠 때에는 config.task에 자동으로 각각의 환경으로 들어가지도록 해야함.
+
+
+
+3. Dreamer에서 gym 버전 호환 때문에 0.19.0 쓰라는 거 같은데, 0.22.0은 되는지는 모르겠다.
+```
+pip install "pip<24.1"
+pip install "gym==0.19.0"
+sudo apt-get update
+sudo apt-get install build-essential cmake
+conda update libstdcxx-ng
+conda install gxx_linux-64
+mv /home/hail/anaconda3/envs/dreamer/lib/libstdc++.so.6 /home/hail/anaconda3/envs/dreamer/lib/libstdc++.so.6.bak
+
+pip install gym[atari]
+```
 <br>
 
 
@@ -117,6 +132,15 @@ main branch로 올라간 첫 버전은 그냥 SUGARL를 wandb에 찍을 수 있�
 
 <br>
 
+
+## DreamerV3
+```
+sudo apt-get update
+sudo apt-get install unrar
+bash dreamerv3-torch/envs/setup_scripts/atari.sh 
+pip install "gym[atari,accept-rom-license]"
+```
+<br>
 
 ## Citation
 Please consider cite us if you find this repo helpful.

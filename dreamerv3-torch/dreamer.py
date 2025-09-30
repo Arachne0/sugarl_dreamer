@@ -22,7 +22,7 @@ from torch import nn
 from torch import distributions as torchd
 
 from pathlib import Path
-
+from tqdm import tqdm
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -94,7 +94,7 @@ class Dreamer(nn.Module):
         embed = self._wm.encoder(obs)
         latent, _ = self._wm.dynamics.obs_step(latent, action, embed, obs["is_first"])
         if self._config.eval_state_mean:
-            latent["stoch"] = latent["mean"]
+            latent["stoch"] = latent["mean"]  
         feat = self._wm.dynamics.get_feat(latent)
         if not training:
             actor = self._task_behavior.actor(feat)
@@ -210,8 +210,8 @@ def main(config):
     if config.deterministic_run:
         tools.enable_deterministic_run()
     logdir = pathlib.Path(config.logdir).expanduser()
-    config.traindir = config.traindir or logdir / "train_eps"
-    config.evaldir = config.evaldir or logdir / "eval_eps"
+    config.traindir = Path(config.traindir) or Path(logdir / "train_eps")
+    config.evaldir = Path(config.evaldir) or Path(logdir / "eval_eps")
     config.steps //= config.action_repeat
     config.eval_every //= config.action_repeat
     config.log_every //= config.action_repeat
@@ -302,7 +302,6 @@ def main(config):
 
     # make sure eval will be executed once after config.steps
     while agent._step < config.steps + config.eval_every:
-        logger.write()
         if config.eval_episode_num > 0:
             print("Start evaluation.")
             eval_policy = functools.partial(agent, training=False)
@@ -345,8 +344,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs_path = Path("/home/hail/SH/sugarl/dreamerv3-torch/configs.yaml")
-    configs = yaml.safe_load(configs_path.read_text())
+    configs = yaml.safe_load(
+        (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
+    )
 
     def recursive_update(base, update):
         for key, value in update.items():
@@ -355,7 +355,8 @@ if __name__ == "__main__":
             else:
                 base[key] = value
 
-    name_list = ["defaults", *args.configs] if args.configs else ["defaults"]
+    # name_list = ["defaults", *args.configs] if args.configs else ["defaults"]
+    name_list = ["defaults", "atari100k", *args.configs] if args.configs else ["defaults", "atari100k"]
     defaults = {}
     for name in name_list:
         recursive_update(defaults, configs[name])

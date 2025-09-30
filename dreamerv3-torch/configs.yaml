@@ -1,8 +1,8 @@
 defaults:
 
-  logdir: null
-  traindir: null
-  evaldir: null
+  logdir: ./dreamerv3-torch/logdir/100k_atari
+  traindir: ./dreamerv3-torch/logdir/100k_atari/train_eps
+  evaldir: ./dreamerv3-torch/logdir/100k_atari/eval_eps
   offline_traindir: ''
   offline_evaldir: ''
   seed: 0
@@ -20,12 +20,12 @@ defaults:
   video_pred_log: True
 
   # Environment
-  task: 'dmc_walker_walk'
-  size: [64, 64]
+  task: 'atari_pong'
+  size: [84, 84]
   envs: 1
   action_repeat: 2
   time_limit: 1000
-  grayscale: False
+  grayscale: True
   prefill: 2500
   reward_EMA: True
 

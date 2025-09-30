@@ -96,7 +96,7 @@ class Logger:
                 value = np.clip(255 * value, 0, 255).astype(np.uint8)
             B, T, H, W, C = value.shape
             value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
-            self._writer.add_video(name, value, step, 16)
+            # self._writer.add_video(name, value, step, 16)
 
         self._writer.flush()
         self._scalars = {}
@@ -122,7 +122,7 @@ class Logger:
             value = np.clip(255 * value, 0, 255).astype(np.uint8)
         B, T, H, W, C = value.shape
         value = value.transpose(1, 4, 2, 0, 3).reshape((1, T, C, H, B * W))
-        self._writer.add_video(name, value, step, 16)
+        # self._writer.add_video(name, value, step, 16)
 
 
 def simulate(
@@ -239,7 +239,7 @@ def simulate(
                         logger.scalar(f"eval_return", score)
                         logger.scalar(f"eval_length", length)
                         logger.scalar(f"eval_episodes", len(eval_scores))
-                        logger.write(step=logger.step)
+                        # logger.write(step=logger.step)
                         eval_done = True
     if is_eval:
         # keep only last item for saving memory. this cache is used for video_pred later
