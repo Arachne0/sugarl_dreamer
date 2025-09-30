@@ -345,7 +345,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs_path = Path("/home/hail/SH/sugarl/dreamerv3-torch/configs.yaml")
+    configs_path = Path("/home/hail/pan/sugarl_dreamer/dreamerv3-torch/configs.yaml")
     configs = yaml.safe_load(configs_path.read_text())
 
     def recursive_update(base, update):
