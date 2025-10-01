@@ -156,6 +156,7 @@ def make_env(config, mode, id):
         env = wrappers.NormalizeActions(env)
     elif suite == "atari":
         import envs.atari as atari
+        # from envs import wrappers 
 
         env = atari.Atari(
             task,
@@ -170,6 +171,8 @@ def make_env(config, mode, id):
             seed=config.seed + id,
         )
         env = wrappers.OneHotAction(env)
+        if config.num_frames > 1:
+            env = wrappers.FrameStack(env, config.num_frames) 
     elif suite == "dmlab":
         import envs.dmlab as dmlab
 
@@ -355,7 +358,6 @@ if __name__ == "__main__":
             else:
                 base[key] = value
 
-    # name_list = ["defaults", *args.configs] if args.configs else ["defaults"]
     name_list = ["defaults", "atari100k", *args.configs] if args.configs else ["defaults", "atari100k"]
     defaults = {}
     for name in name_list:

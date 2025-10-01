@@ -165,3 +165,7 @@ dmypy.json
 */imgs
 */imgs/*
 *.png
+
+# files
+logdir
+*/logdir/*

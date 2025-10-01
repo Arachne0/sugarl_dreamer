@@ -2,6 +2,7 @@ import datetime
 import gym
 import numpy as np
 import uuid
+from collections import deque
 
 
 class TimeLimit(gym.Wrapper):
@@ -115,3 +116,69 @@ class UUID(gym.Wrapper):
         timestamp = datetime.datetime.now().strftime("%Y%m%dT%H%M%S")
         self.id = f"{timestamp}-{str(uuid.uuid4().hex)}"
         return self.env.reset()
+
+
+class FrameStack(gym.Wrapper):
+    def __init__(self, env, num_frames):
+        super().__init__(env)
+        
+        self.num_frames = num_frames
+        
+        # Check if the observation is a dictionary and contains the 'image' key
+        if not isinstance(env.observation_space, gym.spaces.Dict) or 'image' not in env.observation_space.spaces:
+            raise ValueError(
+                "FrameStack wrapper requires a Dict observation space with an 'image' key."
+            )
+            
+        image_space = env.observation_space['image']
+        self.shape = image_space.shape
+        self.dtype = image_space.dtype
+        
+        # Initialize the deque (buffer) to store the last N frames
+        self._frames = deque(maxlen=num_frames)
+        
+        # 1. Update the observation space
+        # New shape will be (H, W, C * num_frames)
+        new_shape = self.shape[:-1] + (self.shape[-1] * num_frames,)
+        
+        # 2. Re-create the observation space (keeping other keys as is)
+        new_obs_space = env.observation_space.spaces.copy()
+        new_obs_space['image'] = gym.spaces.Box(
+            low=0, high=255, shape=new_shape, dtype=self.dtype
+        )
+        self._observation_space = gym.spaces.Dict(new_obs_space)
+
+    def _get_observation(self):
+        # Ensure the number of frames in the deque matches num_frames
+        assert len(self._frames) == self.num_frames
+    
+        return np.concatenate(list(self._frames), axis=-1)
+
+    def reset(self, **kwargs):
+        self._step = 0
+    
+        obs_dict  = self.env.reset(**kwargs)
+        
+        initial_frame = obs_dict['image']
+        self._frames.clear()
+        for _ in range(self.num_frames):
+            self._frames.append(initial_frame.copy()) 
+            
+        stacked_obs = self._get_observation()
+        obs_dict['image'] = stacked_obs
+    
+        return obs_dict, {} 
+
+    def step(self, action):
+        obs_dict, reward, done, info = self.env.step(action) 
+        
+        # Get the current frame and push it to the buffer
+        current_frame = obs_dict['image']
+        self._frames.append(current_frame)
+        stacked_obs = self._get_observation()
+        
+        # IMPORTANT: Update the 'image' key and preserve all other metadata
+        # (e.g., is_first, is_terminal, if they are in obs_dict)
+        obs_dict['image'] = stacked_obs
+
+        return obs_dict, reward, done, info

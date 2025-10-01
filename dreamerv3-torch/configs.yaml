@@ -1,8 +1,8 @@
 defaults:
 
-  logdir: ./dreamerv3-torch/logdir/100k_atari
-  traindir: ./dreamerv3-torch/logdir/100k_atari/train_eps
-  evaldir: ./dreamerv3-torch/logdir/100k_atari/eval_eps
+  logdir: ./logdir/100k_atari
+  traindir: ./logdir/100k_atari/train_eps
+  evaldir: ./logdir/100k_atari/eval_eps
   offline_traindir: ''
   offline_evaldir: ''
   seed: 0
@@ -25,6 +25,7 @@ defaults:
   envs: 1
   action_repeat: 2
   time_limit: 1000
+  # grayscale: False
   grayscale: True
   prefill: 2500
   reward_EMA: True
@@ -144,6 +145,7 @@ atari100k:
   resize: opencv
   actions: needed
   time_limit: 108000
+  num_frames: 4
 
 minecraft:
   task: minecraft_diamond

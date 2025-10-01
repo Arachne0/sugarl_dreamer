@@ -448,71 +448,74 @@ class MultiDecoder(nn.Module):
 class ConvEncoder(nn.Module):
     def __init__(
         self,
-        input_shape, # Expected format: (H, W, C). For Atari: (84, 84, 4)
-        depth=32,    # Unused in this custom Atari structure
+        input_shape, 
+        depth=32,    
         act="SiLU", 
-        norm=True,   # Unused
-        kernel_size=4, # Unused
-        minres=4,    # Unused
+        norm=True,  
+        kernel_size=4, 
+        minres=4,    
     ):
         super(ConvEncoder, self).__init__()
         
+        def get_norm_layer(out_dim):
+            return ImgChLayerNorm(out_dim)    
+        
         # Get the activation function class from torch.nn
         act_fn = getattr(torch.nn, act)
-        
         h, w, input_ch = input_shape
-        
-        if h != 84 or w != 84:
-             print(f"Warning: Input size is {h}x{w}, but this encoder is hardcoded for 84x84 Atari input to produce 3136 output.")
         
         layers = []
         
-        # 1st Conv: (C=input_ch, H=84, W=84) -> (C=32, H=20, W=20)
-        layers.append(nn.Conv2d(in_channels=input_ch, out_channels=32, kernel_size=8, stride=4))
-        layers.append(act_fn())
+        conv_stages = [
+            (32, 8, 4),  # Stage 1: out_ch=32, kernel=8, stride=4
+            (64, 4, 2),  # Stage 2: out_ch=64, kernel=4, stride=2
+            (64, 3, 1),  # Stage 3: out_ch=64, kernel=3, stride=1
+        ]
+        in_dim = input_ch
         
-        # 2nd Conv: (C=32, H=20, W=20) -> (C=64, H=9, W=9)
-        layers.append(nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2))
-        layers.append(act_fn()) 
-        
-        # 3rd Conv: (C=64, H=9, W=9) -> (C=64, H=7, W=7)
-        layers.append(nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1))
-        layers.append(act_fn()) 
+        for out_dim, kernel_size, stride in conv_stages:
+            layers.append(
+                    nn.Conv2d(
+                        in_channels=in_dim, 
+                        out_channels=out_dim, 
+                        kernel_size=kernel_size, 
+                        stride=stride,
+                        bias=False,
+                    )
+                )
+            if norm:
+                layers.append(get_norm_layer(out_dim))
+                
+            layers.append(act_fn())
+            in_dim = out_dim
 
         self.layers = nn.Sequential(*layers)
-        
-        # Final output dimension for 64 * 7 * 7 = 3136
         self.outdim = 3136
+        self.layers.apply(tools.weight_init) 
         
-        # If 'tools' is available in your environment, uncomment this line:
-        # self.layers.apply(tools.weight_init) 
 
     def forward(self, obs):
-        # The forward logic for batch and time dimensions is kept
-        
         # Normalize: [0, 1] -> [-0.5, 0.5]
         obs -= 0.5 
         
         # (batch, time, h, w, ch) -> (batch * time, h, w, ch)
         x = obs.reshape((-1,) + tuple(obs.shape[-3:]))
         
-        # (batch * time, h, w, ch) -> (batch * time, ch, h, w) for PyTorch Conv
+        # (batch * time, h, w, ch) -> (batch * time, ch, h, w)
         x = x.permute(0, 3, 1, 2)
-        
-        # Pass through 3-Conv layers
         x = self.layers(x)
         
         # Flatten: (batch * time, C, H, W) -> (batch * time, C*H*W)
         x = x.reshape([x.shape[0], np.prod(x.shape[1:])])
         
-        # (batch * time, 3136) -> (batch, time, 3136)
+        # (batch * time, C*H*W) -> (batch, time, C*H*W)
         return x.reshape(list(obs.shape[:-3]) + [x.shape[-1]])
     
 class ConvDecoder(nn.Module):
     def __init__(
         self,
         feat_size, 
-        shape=(1, 84, 84), 
+        shape=(4, 84, 84), 
         depth=32,
         act="SiLU",
         norm=True,
@@ -523,42 +526,60 @@ class ConvDecoder(nn.Module):
     ):
         super(ConvDecoder, self).__init__()
         
+        def get_norm_layer(out_dim):
+            return ImgChLayerNorm(out_dim)  
+        
         # Get activation function
         act_fn = getattr(torch.nn, act)
         self._shape = shape
+        self._cnn_sigmoid = cnn_sigmoid
         
         # Initial volume setup (Reverse of 84x84 input encoder: 7x7x64)
         TARGET_H, TARGET_W, TARGET_CH = 7, 7, 64 
         self._minres = TARGET_H
-        self._embed_size = TARGET_CH * TARGET_H * TARGET_W # 3136
+        self._embed_size = TARGET_CH * TARGET_H * TARGET_W
         
         # Linear layer: feat_size -> initial volume size
         self._linear_layer = nn.Linear(feat_size, self._embed_size)
+        self._linear_layer.apply(tools.uniform_weight_init(outscale))
+
+        Tconv_stages = [
+            (TARGET_CH, 64, 3, 1),      # Stage 1: (7x7x64) -> (7x7x64)
+            (64, 32, 4, 2),             # Stage 2: (7x7x64) -> (16x16x32) 
+            (32, self._shape[0], 8, 4), # Stage 3: (16x16x32) -> (84x84xself._shape[0]) 
+        ] 
         
-        layers = []
-        
-        # T-Conv 1 (Reverse of Conv 3): (64, 7, 7) -> (64, 9, 9). K=3, S=1, P=0
-        layers.append(
-            nn.ConvTranspose2d(TARGET_CH, 64, kernel_size=3, stride=1, padding=0, output_padding=0, bias=True)
-        )
-        layers.append(act_fn())
-        
-        # T-Conv 2 (Reverse of Conv 2): (64, 9, 9) -> (32, 20, 20). K=4, S=2, P=0
-        layers.append(
-            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=0, output_padding=0, bias=True)
-        )
-        layers.append(act_fn())
-        
-        # T-Conv 3 (Reverse of Conv 1): (32, 20, 20) -> (1, 84, 84). K=8, S=4, P=0
-        layers.append(
-            nn.ConvTranspose2d(32, self._shape[0], kernel_size=8, stride=4, padding=0, output_padding=0, bias=True)
-        )
-        
+        layers = [] 
+        for i, (in_ch, out_ch, k_size, stride) in enumerate(Tconv_stages):
+            bias = False
+            
+            if (i == len(Tconv_stages) - 1): # Final Layer
+                act = False
+                bias = True
+                norm = False
+                
+            tconv_layer = nn.ConvTranspose2d(
+                in_channels=in_ch,
+                out_channels=out_ch,
+                kernel_size=k_size,
+                stride=stride,
+                bias=bias,
+            )
+            layers.append(tconv_layer)
+            
+            if norm:
+                layers.append(get_norm_layer(out_ch))
+            
+            if act:
+                layers.append(act_fn())
+            
+        [layer.apply(tools.weight_init) for layer in layers[:-1]]
+        layers[-1].apply(tools.uniform_weight_init(outscale))
         self.layers = nn.Sequential(*layers)
+
 
     def forward(self, features):
         # Forward logic for batch and time dimensions
-        
         x = self._linear_layer(features)
         
         # Reshape to (batch * time, H, W, C)
@@ -566,18 +587,19 @@ class ConvDecoder(nn.Module):
             [-1, self._minres, self._minres, self._embed_size // self._minres**2]
         )
         
-        # Permute to PyTorch (batch * time, C, H, W)
+        # Permute to (batch * time, C, H, W)
         x = x.permute(0, 3, 1, 2)
         x = self.layers(x) 
         
         # Reshape and permute back to (batch, time, H, W, C)
         mean = x.reshape(features.shape[:-1] + self._shape).permute(0, 1, 3, 4, 2)
         
-        # Denormalization (reverse of obs -= 0.5 in encoder)
-        mean += 0.5 
-            
+        # Denormalization 
+        if self._cnn_sigmoid:
+            mean = F.sigmoid(mean)
+        else:
+            mean += 0.5 
         return mean
-    
 
 class MLP(nn.Module):
     def __init__(
