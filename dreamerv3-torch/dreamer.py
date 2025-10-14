@@ -342,14 +342,12 @@ def main(config):
         except Exception:
             pass
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs = yaml.safe_load(
-        (pathlib.Path(sys.argv[0]).parent / "configs.yaml").read_text()
-    )
+    configs_path = Path("/home/hail/pan/sugarl_dreamer/dreamerv3-torch/configs.yaml")
+    configs = yaml.safe_load(configs_path.read_text())
 
     def recursive_update(base, update):
         for key, value in update.items():
