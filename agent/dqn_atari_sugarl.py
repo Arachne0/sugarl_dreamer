@@ -342,14 +342,16 @@ if __name__ == "__main__":
 
     atari_Encoder = Encoder(obs.shape).to(device)
     atari_Decoder = Decoder(512).to(device)
-
+    pred_frame_parameters = list(atari_Encoder.parameters()) + list(atari_Decoder.parameters())
+    pred_frame_optimizer = torch.optim.Adam(pred_frame_parameters, lr=0.001)
+    
     # (1, T, 1, 84, 84)
     obs_to_LSTM = np.stack(obs_buffer, axis = 1)
     obs_latent = atari_Encoder(torch.tensor(obs_to_LSTM).to(device))
     
     # (1, 1, 84, 84)
-    output_LSTM = atari_Decoder(obs_latent)
-    output_LSTM = output_LSTM.detach().cpu().numpy()
+    new_frame = atari_Decoder(obs_latent)
+    output_LSTM = new_frame.detach().cpu().numpy()
     # (1, 5, 84, 84)
     obs = obs[:,1:, :,:]
     new_obs = np.concatenate((obs, output_LSTM), axis=1)
@@ -407,9 +409,15 @@ if __name__ == "__main__":
 
         if global_transitions < args.batch_size:
             continue
-
+        
         # Training
         if global_transitions % args.train_frequency == 0:
+            next_obs_ = torch.tensor(next_obs, device=device)
+            pred_frame_loss = F.mse_loss(new_frame, [:, [4], :, :]))
+            pred_frame_optimizer.zero_grad()
+            pred_frame_loss.backward()
+            pred_frame_optimizer.step()
+            
             data = rb.sample(args.batch_size // args.env_num) # counter-balance the true global transitions used for training
 
             # sfn learning
