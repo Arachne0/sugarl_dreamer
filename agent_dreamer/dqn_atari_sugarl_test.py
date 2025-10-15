@@ -20,6 +20,7 @@ from common.utils import (
     weight_init_drq,
     TruncatedNormal
 )
+
 import gymnasium as gym
 from gymnasium.spaces import Discrete, Dict
 import numpy as np
@@ -35,7 +36,7 @@ from common.utils import get_timestr, seed_everything, get_sugarl_reward_scale_a
 from torch.utils.tensorboard import SummaryWriter
 
 from active_gym.atari_env import AtariFixedFovealEnv, AtariEnvArgs
-from collections import deque
+
 
 def parse_args():
     # fmt: off
@@ -54,7 +55,7 @@ def parse_args():
         help="the id of the environment")
     parser.add_argument("--env-num", type=int, default=1, 
         help="# envs in parallel")
-    parser.add_argument("--frame-stack", type=int, default=5,
+    parser.add_argument("--frame-stack", type=int, default=4,
         help="frame stack #")
     parser.add_argument("--action-repeat", type=int, default=4,
         help="action repeat #")
@@ -133,10 +134,10 @@ class Encoder(nn.Module):
         self.repr_dim = 512
 
         self.convnet = nn.Sequential(nn.Conv2d(channel, 32, 3, stride=2),
-                                     nn.Sigmoid(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.Sigmoid(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.Sigmoid(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.Sigmoid())
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU())
         
         self.neck = nn.Sequential(
             nn.Linear(self.cnn_repr_dim, 3136),
@@ -169,9 +170,9 @@ class Decoder(nn.Module):
     
         self.deconvnet = nn.Sequential(
             nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1),
-            nn.Sigmoid(),
+            nn.ReLU(),
             nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2),
-            nn.Sigmoid(),
+            nn.ReLU(),
             nn.ConvTranspose2d(32, 1, kernel_size=8, stride=4),
             nn.Sigmoid(),
         )
@@ -180,6 +181,7 @@ class Decoder(nn.Module):
         x = self.fc(x)
         x = x.view(-1, 64, 7, 7)
         x = self.deconvnet(x)
+        x = x.reshape(-1, 84, 84)
         return x
 
 # ALGO LOGIC: initialize agent here:
@@ -196,7 +198,7 @@ class QNetwork(nn.Module):
             else:
                 sensory_action_space_size = env.single_action_space["sensory_action"].n
         self.backbone = nn.Sequential(
-            nn.Conv2d(5, 32, 8, stride=4),
+            nn.Conv2d(4, 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
@@ -235,7 +237,7 @@ class SelfPredictionNetwork(nn.Module):
                 sensory_action_space_size = env.single_action_space["sensory_action"].n
         
         self.backbone = nn.Sequential(
-            nn.Conv2d(10, 32, 8, stride=4),
+            nn.Conv2d(8, 32, 8, stride=4),
             nn.ReLU(),
             nn.Conv2d(32, 64, 4, stride=2),
             nn.ReLU(),
@@ -337,30 +339,26 @@ if __name__ == "__main__":
     # TRY NOT TO MODIFY: start the game
     # (1, 4, 84, 84)
     obs, infos = envs.reset()
-    obs_buffer = deque([], maxlen=args.pvm_stack)
-    obs_buffer.append(obs)
 
     atari_Encoder = Encoder(obs.shape).to(device)
     atari_Decoder = Decoder(512).to(device)
 
     # (1, T, 1, 84, 84)
-    obs_to_LSTM = np.stack(obs_buffer, axis = 1)
-    obs_latent = atari_Encoder(torch.tensor(obs_to_LSTM).to(device))
+    obs_to_LSTM = np.stack(obs, axis = 1)
+    obs_latent = atari_Encoder(obs_to_LSTM)
     
     # (1, 1, 84, 84)
     output_LSTM = atari_Decoder(obs_latent)
-    output_LSTM = output_LSTM.detach().cpu().numpy()
+
     # (1, 5, 84, 84)
-    obs = obs[:,1:, :,:]
     new_obs = np.concatenate((obs, output_LSTM), axis=1)
 
     global_transitions = 0
-    pvm_buffer = PVMBuffer(args.pvm_stack, (envs.num_envs, args.frame_stack,)+OBSERVATION_SIZE)
+    pvm_buffer = PVMBuffer(args.pvm_stack, (envs.num_envs, args.frame_stack+1,)+OBSERVATION_SIZE)
 
     while global_transitions < args.total_timesteps:
         pvm_buffer.append(new_obs)
         pvm_obs = pvm_buffer.get_obs(mode="stack_max")
-
         # ALGO LOGIC: put action logic here
         epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_transitions)
         if random.random() < epsilon:
