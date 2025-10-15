@@ -29,6 +29,18 @@ from torch.utils.tensorboard import SummaryWriter
 
 from active_gym import AtariFixedFovealEnv, AtariEnvArgs
 
+from common.utils import (
+    get_sugarl_reward_scale_robosuite,
+    get_timestr, 
+    schedule_drq,
+    seed_everything,
+    soft_update_params,
+    weight_init_drq,
+    TruncatedNormal
+)
+from collections import deque
+import copy
+
 import wandb
 
 def parse_args():
@@ -70,7 +82,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--total-timesteps", type=int, default=5000000,
         help="total timesteps of the experiments")
-    parser.add_argument("--buffer-size", type=int, default=int(1e6),
+    parser.add_argument("--buffer-size", type=int, default=int(1e5),
         help="the replay memory buffer size") # smaller than in original paper but evaluation is done only for 100k steps anyway
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
@@ -127,11 +139,76 @@ def layer_init(layer, bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
-
 # ALGO LOGIC: initialize agent here:
 # NOTE: Sharing a CNN encoder between Actor and Critics is not recommended for SAC without stopping actor gradients
 # See the SAC+AE paper https://arxiv.org/abs/1910.01741 for more info
 # TL;DR The actor's gradients mess up the representation when using a joint encoder
+
+class Encoder(nn.Module):
+    def __init__(self, obs_shape):
+        super().__init__()
+
+        if len(obs_shape) == 3:
+            channel = obs_shape[0]
+        elif len(obs_shape) == 4:
+            channel = obs_shape[1]
+        elif len(obs_shape) == 5:
+            channel = obs_shape[2]
+        
+        self.cnn_repr_dim = 32 * 35 * 35
+        self.repr_dim = 512
+
+        self.convnet = nn.Sequential(nn.Conv2d(channel, 32, 3, stride=2),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU())
+        
+        self.neck = nn.Sequential(
+            nn.Linear(self.cnn_repr_dim, 3136),
+            nn.ReLU(),
+            nn.Linear(3136, self.repr_dim),
+            nn.ReLU()
+        )
+
+        self.rnn = nn.LSTM(self.repr_dim, self.repr_dim, 1, batch_first=True)
+
+        self.apply(weight_init_drq)
+
+    def forward(self, obs):
+        # obs [B, T, C, H, W]
+        # transforms [B, T, 2, 3]
+        obs = obs - 0.5 # /255 is done by env
+        B, T, C, H, W = obs.size()
+        obs = obs.reshape(B*T, C, H, W)
+        h = self.convnet(obs)
+        h = self.neck(h.reshape(B*T, -1))
+        h, _ = self.rnn(h.reshape(B, T, -1))
+        h = h[:, -1, :]
+        return h
+    
+class Decoder(nn.Module):
+    def __init__(self, repr_dim):
+        super().__init__()
+        
+        self.fc = nn.Linear(repr_dim, 64 * 7 * 7) # repr_dim은 512
+    
+        self.deconvnet = nn.Sequential(
+            nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1),
+            nn.ReLU(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 1, kernel_size=8, stride=4),
+            nn.Sigmoid(),
+        )
+        
+    def forward(self, x):
+        x = self.fc(x)
+        x = x.view(-1, 64, 7, 7)
+        x = self.deconvnet(x)
+        x = x.reshape(-1, 84, 84)
+        return x
+
 class SoftQNetwork(nn.Module):
     def __init__(self, env, sensory_action_set=None):
         super().__init__()
@@ -282,13 +359,13 @@ if __name__ == "__main__":
         if not os.path.exists(run_dir):
             os.makedirs(run_dir, exist_ok=True)
             
-        wandb.init(
-            project="SUGARL_Dreamer_v3", 
-            name=f"Atrai-{args.env}_Seed-{args.seed}",
-            entity="hails", 
-            config=args,
-            reinit=True
-        )
+        # wandb.init(
+        #     project="SUGARL_Dreamer_v3", 
+        #     name=f"Atrai-{args.env}_Seed-{args.seed}",
+        #     entity="hails", 
+        #     config=args,
+        #     reinit=True
+        # )
 
         writer = SummaryWriter(os.path.join(run_dir, run_name))
         writer.add_text(
@@ -376,10 +453,40 @@ if __name__ == "__main__":
         # TRY NOT TO MODIFY: start the game
         obs, infos = envs.reset()
         global_transitions = 0
+
+        old_pvm_buffer = deque([], maxlen=args.pvm_stack)
+
         pvm_buffer = PVMBuffer(args.pvm_stack, (envs.num_envs, args.frame_stack,)+OBSERVATION_SIZE)
+
+        old_pvm_buffer.append(obs)        
+        # (1, T, 4, 84, 84)
+        old_pvm_obs = np.stack(old_pvm_buffer, axis=1)
+
+        atari_Encoder = Encoder(old_pvm_obs.shape).to(device)
+        atari_Decoder = Decoder(512).to(device)
+        
         while global_transitions < args.total_timesteps:
-            pvm_buffer.append(obs)
-            pvm_obs = pvm_buffer.get_obs(mode="stack_max")
+            
+            # TODO insert LSTM
+            # if (obs[0][0].all() != 0) or (obs[0][1].all() != 0) or (obs[0][2].all() != 0) or (obs[0][3].all() != 0):
+            #     atari_latent = atari_Encoder(torch.tensor(old_pvm_obs).to(device))
+            #     new_partial_img = atari_Decoder(atari_latent)
+            #     new_obs = np.concatenate((obs, new_partial_img), axis=1)
+            # else:
+            #     new_obs = np.concatenate((obs, np.zeros((1,1,84,84), dtype = np.float32)), axis=1)
+                                      
+            if (obs[0][0].all() != 0) or (obs[0][1].all() != 0) or (obs[0][2].all() != 0) or (obs[0][3].all() != 0):
+                atari_latent = atari_Encoder(torch.tensor(old_pvm_obs).to(device))
+                new_partial_img = atari_Decoder(atari_latent)
+                pvm_buffer.append(new_partial_img)                       
+
+            pvm_buffer.append(new_obs)
+            pvm_buffer_obs = pvm_buffer.get_obs(mode="stack_max")
+
+            # pvm_buffer.append(new_obs)
+            # (1, 5, 84, 84)
+            # old_pvm_obs = old_pvm_buffer.get_obs(mode="stack_max")
+
             # ALGO LOGIC: put action logic here
             if global_transitions < args.learning_starts:
                 actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
@@ -402,10 +509,10 @@ if __name__ == "__main__":
                         writer.add_scalar("charts/episodic_return", infos['final_info'][idx]["reward"], global_transitions)
                         writer.add_scalar("charts/episodic_length", infos['final_info'][idx]["ep_len"], global_transitions)
                         
-                        wandb.log({
-                            f"charts/episodic_return": infos['final_info'][idx]["reward"],
-                            f"charts/episodic_length": infos['final_info'][idx]["ep_len"]
-                        }, step=global_transitions)
+                        # wandb.log({
+                        #     f"charts/episodic_return": infos['final_info'][idx]["reward"],
+                        #     f"charts/episodic_length": infos['final_info'][idx]["ep_len"]
+                        # }, step=global_transitions)
                         break
 
             # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
@@ -540,17 +647,17 @@ if __name__ == "__main__":
                         if args.sensory_alpha_autotune:
                             writer.add_scalar("losses/sensory_alpha_loss", sensory_alpha_loss.item(), global_transitions)
                             
-                        wandb.log({
-                            "losses/qf1_loss": qf1_loss.item(),
-                            "losses/qf2_loss": qf2_loss.item(),
-                            "losses/qf_loss": qf_loss.item() / 2.0,
-                            "losses/actor_loss": actor_loss.item(),
-                            "losses/motor_alpha": motor_alpha,
-                            "losses/sensory_alpha": sensory_alpha,
-                            "charts/SPS": int(global_transitions / (time.time() - start_time)),
-                            "losses/motor_alpha_loss": motor_alpha_loss.item() if args.autotune else None,
-                            "losses/sensory_alpha_loss": sensory_alpha_loss.item() if args.sensory_alpha_autotune else None
-                        }, step=global_transitions)
+                        # wandb.log({
+                        #     "losses/qf1_loss": qf1_loss.item(),
+                        #     "losses/qf2_loss": qf2_loss.item(),
+                        #     "losses/qf_loss": qf_loss.item() / 2.0,
+                        #     "losses/actor_loss": actor_loss.item(),
+                        #     "losses/motor_alpha": motor_alpha,
+                        #     "losses/sensory_alpha": sensory_alpha,
+                        #     "charts/SPS": int(global_transitions / (time.time() - start_time)),
+                        #     "losses/motor_alpha_loss": motor_alpha_loss.item() if args.autotune else None,
+                        #     "losses/sensory_alpha_loss": sensory_alpha_loss.item() if args.sensory_alpha_autotune else None
+                        # }, step=global_transitions)
 
                 # evaluation
                 if (global_transitions % args.eval_frequency == 0 and args.eval_frequency > 0) or \
@@ -603,10 +710,10 @@ if __name__ == "__main__":
 
                     writer.add_scalar("charts/eval_episodic_return", np.mean(eval_episodic_returns), global_transitions)
                     writer.add_scalar("charts/eval_episodic_return_std", np.std(eval_episodic_returns), global_transitions)
-                    wandb.log({
-                        "charts/eval_episodic_return": np.mean(eval_episodic_returns),
-                        "charts/eval_episodic_return_std": np.std(eval_episodic_returns)
-                    }, step=global_transitions)
+                    # wandb.log({
+                    #     "charts/eval_episodic_return": np.mean(eval_episodic_returns),
+                    #     "charts/eval_episodic_return_std": np.std(eval_episodic_returns)
+                    # }, step=global_transitions)
                     # writer.add_scalar("charts/eval_episodic_length", np.mean(), global_transitions)
                     print(f"[T: {time.time()-start_time:.2f}]  [N: {global_transitions:07,d}]  [Eval R: {np.mean(eval_episodic_returns):.2f}+/-{np.std(eval_episodic_returns):.2f}] [R list: {','.join([str(r) for r in eval_episodic_returns])}]")
 
@@ -620,4 +727,4 @@ if __name__ == "__main__":
         envs.close()
         eval_env.close()
         writer.close()
-        wandb.finish()
+        # wandb.finish()

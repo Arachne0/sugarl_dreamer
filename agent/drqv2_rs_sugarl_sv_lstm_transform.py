@@ -86,7 +86,7 @@ def parse_args():
     # Algorithm specific arguments
     parser.add_argument("--total-timesteps", type=int, default=1000000,
         help="total timesteps of the experiments")
-    parser.add_argument("--buffer-size", type=int, default=int(1e6),
+    parser.add_argument("--buffer-size", type=int, default=int(1e5),
         help="the replay memory buffer size")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
@@ -213,7 +213,6 @@ class Encoder(nn.Module):
         h, _ = self.rnn(h.reshape(B, T, -1))
         h = h[:, -1, :]
         return h
-
 
 class ActiveActor(nn.Module):
     def __init__(self, 
@@ -371,7 +370,6 @@ class DrQV2SugarlAgent:
             low, high = thresh[i], thresh[i+1]
             threshed [np.where((va >= low) & (va < high))] = i
         return threshed
-
 
     def act(self, obs, transforms, step, eval_mode=None):
         obs = self.encoder(obs, transforms)
@@ -551,6 +549,7 @@ if __name__ == "__main__":
 
     sugarl_reward_scale = get_sugarl_reward_scale_robosuite(args.task_name)
     sensory_action_space = Box(low=-1., high=1., shape=(5,))
+
     drq_agent = DrQV2SugarlAgent(
         (args.pvm_stack, *envs.single_observation_space["active_view_image"].shape),
         envs.single_action_space["motor_action"].shape,
@@ -589,12 +588,14 @@ if __name__ == "__main__":
     obs = obs[selected_cam]
     extrinsic = np.stack([infos["movable_cam_extrinsic"][i]["active_view"] for i in range(envs.num_envs)], axis=0)
     global_transitions = 0
+
     pvm_buffer = PVMBuffer(
         args.pvm_stack, 
         (envs.num_envs, *envs.single_observation_space["active_view_image"].shape),
         fov_loc_size=(envs.num_envs, 4, 4) # before processing
     )
     reset_pvm_buffer = False
+
     while global_transitions < args.total_timesteps:
         pvm_buffer.append(obs, extrinsic)
         pvm_obs = pvm_buffer.get_obs(mode="stack")

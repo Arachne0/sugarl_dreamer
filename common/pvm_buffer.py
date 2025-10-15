@@ -4,6 +4,8 @@ import copy
 
 import numpy as np
 
+
+
 class PVMBuffer:
 
     def __init__(self, max_len: int, obs_size: Tuple, fov_loc_size: Tuple = None) -> None:
@@ -13,8 +15,7 @@ class PVMBuffer:
         self.buffer = None
         self.fov_loc_buffer = None
         self.init_pvm_buffer()
-
-
+        
     def init_pvm_buffer(self) -> None:
         self.buffer = deque([], maxlen=self.max_len)
         self.fov_loc_buffer = deque([], maxlen=self.max_len)
@@ -23,7 +24,6 @@ class PVMBuffer:
             if self.fov_loc_size is not None: # (1, 2) or (1, 2, 3)
                 self.fov_loc_buffer.append(np.zeros(self.fov_loc_size, dtype=np.float32))
 
-    
     def append(self, x, fov_loc=None) -> None:
         self.buffer.append(x)
         if fov_loc is not None:
