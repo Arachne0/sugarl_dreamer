@@ -307,8 +307,7 @@ if __name__ == "__main__":
     # get a discrete observ action space
     OBSERVATION_SIZE = (84, 84)
     observ_x_max, observ_y_max = OBSERVATION_SIZE[0]-args.fov_size, OBSERVATION_SIZE[1]-args.fov_size
-    sensory_action_step = (observ_x_max//args.sensory_action_x_size,
-                          observ_y_max//args.sensory_action_y_size)
+    sensory_action_step = (observ_x_max//args.sensory_action_x_size, observ_y_max//args.sensory_action_y_size)
     sensory_action_x_set = list(range(0, observ_x_max, sensory_action_step[0]))[:args.sensory_action_x_size]
     sensory_action_y_set = list(range(0, observ_y_max, sensory_action_step[1]))[:args.sensory_action_y_size]
     sensory_action_set = [np.array(a) for a in list(product(sensory_action_x_set, sensory_action_y_set))]

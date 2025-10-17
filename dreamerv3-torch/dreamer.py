@@ -171,8 +171,7 @@ def make_env(config, mode, id):
             seed=config.seed + id,
         )
         env = wrappers.OneHotAction(env)
-        if config.num_frames > 1:
-            env = wrappers.FrameStack(env, config.num_frames) 
+        
     elif suite == "dmlab":
         import envs.dmlab as dmlab
 

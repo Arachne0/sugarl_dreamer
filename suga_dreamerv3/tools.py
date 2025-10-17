@@ -20,6 +20,31 @@ from torch.utils.tensorboard import SummaryWriter
 to_np = lambda x: x.detach().cpu().numpy()
 
 
+def get_sugarl_reward_scale_atari(game) -> float:
+    base_scale = 4.0
+    sugarl_reward_scale = 1/200
+    if game in ["alien", "assault", "asterix", "battle_zone", "seaquest", "qbert", "private_eye", "road_runner"]:
+        sugarl_reward_scale = 1/100
+    elif game in ["kangaroo", "krull", "chopper_command", "demon_attack"]:
+        sugarl_reward_scale = 1/200
+    elif game in ["up_n_down", "frostbite", "ms_pacman", "amidar", "gopher", "boxing"]:
+        sugarl_reward_scale = 1/50
+    elif game in ["hero", "jamesbond", "kung_fu_master"]:
+        sugarl_reward_scale = 1/25
+    elif game in ["crazy_climber"]:
+        sugarl_reward_scale = 1/20
+    elif game in ["freeway"]:
+        sugarl_reward_scale = 1/1600
+    elif game in ["pong"]:
+        sugarl_reward_scale = 1/800
+    elif game in ["bank_heist"]:
+        sugarl_reward_scale = 1/250
+    elif game in ["breakout"]:
+        sugarl_reward_scale = 1/35
+    sugarl_reward_scale = sugarl_reward_scale * base_scale
+    return sugarl_reward_scale
+
+
 def symlog(x):
     return torch.sign(x) * torch.log(torch.abs(x) + 1.0)
 

@@ -3,6 +3,9 @@ import functools
 import os
 import pathlib
 import sys
+import random
+from itertools import product
+from collections import OrderedDict
 
 os.environ["MUJOCO_GL"] = "osmesa"
 
@@ -160,7 +163,6 @@ def make_env(config, mode, id):
         import pprint
         
         kwargs = vars(config)
-        
         kwargs['game'] = task  
         kwargs['seed'] = config.seed + id
     
@@ -243,8 +245,6 @@ def main(config):
     
     
     # make envs 
-    # 일단 이쪽에 그냥 make_env를 하는게 아니라 active RL용 env wrapper를 씌워야할것 
-    # 그건 make_env 내에서 해
     make = lambda mode, id: make_env(config, mode, id)
     train_envs = [make("train", i) for i in range(config.envs)]
     eval_envs = [make("eval", i) for i in range(config.envs)]
@@ -255,32 +255,43 @@ def main(config):
         train_envs = [Damy(env) for env in train_envs]
         eval_envs = [Damy(env) for env in eval_envs]
         
+    # [TODO] sugarl_r_scale 이걸 밑에 reward계산할 때 넣어줘야함 
+    _, name = config.task.split("_", 1)
+    sugarl_r_scale = tools.get_sugarl_reward_scale_atari(name)
+    
+    # get a discrete observ action space
+    # [TODO] network initialize 할때 넣어줘야하고, rendom action 할 떄에도 sensory_action_set에서
+    # random하게 뽑아야함
+    observ_x_max, observ_y_max = config.obs_size[0]-config.fov_size[0], config.obs_size[1]-config.fov_size[1]
+    sensory_action_step = (observ_x_max//config.sensory_action_x_size, observ_y_max//config.sensory_action_y_size)
+    sensory_action_x_set = list(range(0, observ_x_max, sensory_action_step[0]))[:config.sensory_action_x_size]
+    sensory_action_y_set = list(range(0, observ_y_max, sensory_action_step[1]))[:config.sensory_action_y_size]
+    sensory_action_set = [np.array(a) for a in list(product(sensory_action_x_set, sensory_action_y_set))]
+        
     acts = train_envs[0].action_space
     print("Action Space", acts)
-    motor_action_space = acts['motor_action']
-    config.num_actions = motor_action_space.shape[0]
-
+    config.num_actions = acts['motor_action'].n
+    
+    # replay buffer가 필요없나? 
+    
     # prefill dataset with random policy 
     state = None
     if not config.offline_traindir:
         prefill = max(0, config.prefill - count_steps(config.traindir))
         print(f"Prefill dataset ({prefill} steps).")
-        if hasattr(acts, "discrete"):
-            random_actor = tools.OneHotDist(
-                torch.zeros(config.num_actions).repeat(config.envs, 1)
-            )
-        else:
-            random_actor = torchd.independent.Independent(
-                torchd.uniform.Uniform(
-                    torch.tensor(acts.low).repeat(config.envs, 1),
-                    torch.tensor(acts.high).repeat(config.envs, 1),
-                ),
-                1,
-            )
-
+        
         def random_agent(o, d, s):
-            action = random_actor.sample()
-            logprob = random_actor.log_prob(action)
+            motor_action = train_envs[0].action_space['motor_action'].sample()
+            sensory_action = random.choice(sensory_action_set)
+            
+            action = OrderedDict([
+                ('motor_action', motor_action),
+                ('sensory_action', sensory_action)
+            ])
+            num_motor_actions = train_envs[0].action_space['motor_action'].n
+            num_sensory_actions = len(sensory_action_set)
+            logprob = -np.log(num_motor_actions * num_sensory_actions)
+            
             return {"action": action, "logprob": logprob}, None
 
         state = tools.simulate(

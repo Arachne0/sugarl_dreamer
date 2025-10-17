@@ -56,17 +56,10 @@ class OneHotAction(gym.Wrapper):
         self._random = np.random.RandomState()
         motor_space = env.action_space.spaces['motor_action']
         sensory_space = env.action_space.spaces['sensory_action']
-        
-        motor_one_hot_space = Box(
-            low=0, 
-            high=1, 
-            shape=(motor_space.n,), 
-            dtype=np.float32
-        )
-        motor_one_hot_space.discrete = True
+        motor_space.discrete = True
         
         action_space = Dict({
-            'motor_action': motor_one_hot_space,
+            'motor_action': motor_space,
             'sensory_action': sensory_space  
         })
 
