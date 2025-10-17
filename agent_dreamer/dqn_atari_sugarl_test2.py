@@ -5,13 +5,21 @@ import random
 import time
 from itertools import product
 from distutils.util import strtobool
-
 sys.path.append(osp.dirname(osp.dirname(osp.realpath(__file__))))
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+from common.utils import (
+    get_sugarl_reward_scale_robosuite,
+    get_timestr, 
+    schedule_drq,
+    seed_everything,
+    soft_update_params,
+    weight_init_drq,
+    TruncatedNormal
+)
 import gymnasium as gym
 from gymnasium.spaces import Discrete, Dict
 import numpy as np
@@ -20,20 +28,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torchvision.transforms import Resize
-from torch.distributions.categorical import Categorical
 
 from common.buffer import DoubleActionReplayBuffer
 from common.pvm_buffer import PVMBuffer
 from common.utils import get_timestr, seed_everything, get_sugarl_reward_scale_atari
 from torch.utils.tensorboard import SummaryWriter
 
-from active_gym import AtariFixedFovealEnv, AtariEnvArgs
-
+from active_gym.atari_env import AtariFixedFovealEnv, AtariEnvArgs
+from collections import deque
+import wandb
 
 def parse_args():
     # fmt: off
     parser = argparse.ArgumentParser()
-    parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__),
+    parser.add_argument("--exp-name", type=str, default=os.path.basename(__file__).rstrip(".py"),
         help="the name of this experiment")
     parser.add_argument("--seed", type=int, default=1,
         help="seed of the experiment")
@@ -43,7 +51,7 @@ def parse_args():
         help="whether to capture videos of the agent performances (check out `videos` folder)")
 
     # env setting
-    parser.add_argument("--env", type=str, default="breakout",
+    parser.add_argument("--env", type=str, default="freeway",
         help="the id of the environment")
     parser.add_argument("--env-num", type=int, default=1, 
         help="# envs in parallel")
@@ -52,7 +60,6 @@ def parse_args():
     parser.add_argument("--action-repeat", type=int, default=4,
         help="action repeat #")
     parser.add_argument("--clip-reward", type=lambda x: bool(strtobool(x)), default=False, nargs="?", const=True)
-
 
     # fov setting
     parser.add_argument("--fov-size", type=int, default=50)
@@ -67,36 +74,28 @@ def parse_args():
     parser.add_argument("--pvm-stack", type=int, default=3)
 
     # Algorithm specific arguments
-    parser.add_argument("--total-timesteps", type=int, default=5000000,
+    parser.add_argument("--total-timesteps", type=int, default=1000000,
         help="total timesteps of the experiments")
-    parser.add_argument("--buffer-size", type=int, default=int(1e5),
-        help="the replay memory buffer size") # smaller than in original paper but evaluation is done only for 100k steps anyway
+    parser.add_argument("--learning-rate", type=float, default=1e-4,
+        help="the learning rate of the optimizer")
+    parser.add_argument("--buffer-size", type=int, default=100000,
+        help="the replay memory buffer size")
     parser.add_argument("--gamma", type=float, default=0.99,
         help="the discount factor gamma")
-    parser.add_argument("--tau", type=float, default=1.0,
-        help="target smoothing coefficient (default: 1)") # Default is 1 to perform replacement update
-    parser.add_argument("--batch-size", type=int, default=64,
+    parser.add_argument("--target-network-frequency", type=int, default=1000,
+        help="the timesteps it takes to update the target network")
+    parser.add_argument("--batch-size", type=int, default=32,
         help="the batch size of sample from the reply memory")
-    parser.add_argument("--learning-starts", type=int, default=2e4,
+    parser.add_argument("--start-e", type=float, default=1,
+        help="the starting epsilon for exploration")
+    parser.add_argument("--end-e", type=float, default=0.01,
+        help="the ending epsilon for exploration")
+    parser.add_argument("--exploration-fraction", type=float, default=0.10,
+        help="the fraction of `total-timesteps` it takes from start-e to go end-e")
+    parser.add_argument("--learning-starts", type=int, default=80000,
         help="timestep to start learning")
-    parser.add_argument("--policy-lr", type=float, default=3e-4,
-        help="the learning rate of the policy network optimizer")
-    parser.add_argument("--q-lr", type=float, default=3e-4,
-        help="the learning rate of the Q network network optimizer")
     parser.add_argument("--train-frequency", type=int, default=4,
-        help="the frequency of training updates")
-    parser.add_argument("--target-network-frequency", type=int, default=8000,
-        help="the frequency of updates for the target networks")
-    parser.add_argument("--alpha", type=float, default=0.02,
-        help="Entropy regularization coefficient.")
-    parser.add_argument("--autotune", type=lambda x:bool(strtobool(x)), default=True, nargs="?", const=True,
-        help="automatic tuning of the entropy coefficient")
-    parser.add_argument("--sensory-alpha-autotune", type=lambda x:bool(strtobool(x)), default=False, nargs="?", const=True,
-        help="automatic tuning of the entropy coefficient")
-    parser.add_argument("--motor-target-entropy-scale", type=float, default=0.2,
-        help="coefficient for scaling the autotune entropy target")
-    parser.add_argument("--sensory-target-entropy-scale", type=float, default=0.2,
-        help="coefficient for scaling the autotune entropy target")
+        help="the frequency of training")
 
     # eval args
     parser.add_argument("--eval-frequency", type=int, default=-1,
@@ -120,18 +119,72 @@ def make_env(env_name, seed, **kwargs):
 
     return thunk
 
+class Encoder(nn.Module):
+    def __init__(self, obs_shape):
+        super().__init__()
 
-def layer_init(layer, bias_const=0.0):
-    nn.init.kaiming_normal_(layer.weight)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
+        if len(obs_shape) == 3:
+            channel = obs_shape[0]
+        elif len(obs_shape) == 4:
+            channel = obs_shape[1]
+        elif len(obs_shape) == 5:
+            channel = obs_shape[2]
+        
+        self.cnn_repr_dim = 32 * 35 * 35
+        self.repr_dim = 512
 
+        self.convnet = nn.Sequential(nn.Conv2d(channel, 32, 3, stride=2),
+                                     nn.Sigmoid(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.Sigmoid(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.Sigmoid(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.Sigmoid())
+        
+        self.neck = nn.Sequential(
+            nn.Linear(self.cnn_repr_dim, 3136),
+            nn.ReLU(),
+            nn.Linear(3136, self.repr_dim),
+            nn.ReLU()
+        )
+
+        self.rnn = nn.LSTM(self.repr_dim, self.repr_dim, 1, batch_first=True)
+
+        self.apply(weight_init_drq)
+
+    def forward(self, obs):
+        # obs [B, T, C, H, W]
+        # transforms [B, T, 2, 3]
+        obs = obs - 0.5 # /255 is done by env
+        B, T, C, H, W = obs.size()
+        obs = obs.reshape(B*T, C, H, W)
+        h = self.convnet(obs)
+        h = self.neck(h.reshape(B*T, -1))
+        h, _ = self.rnn(h.reshape(B, T, -1))
+        h = h[:, -1, :]
+        return h
+    
+class Decoder(nn.Module):
+    def __init__(self, repr_dim):
+        super().__init__()
+        
+        self.fc = nn.Linear(repr_dim, 64 * 7 * 7) # repr_dim은 512
+    
+        self.deconvnet = nn.Sequential(
+            nn.ConvTranspose2d(64, 64, kernel_size=3, stride=1),
+            nn.Sigmoid(),
+            nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2),
+            nn.Sigmoid(),
+            nn.ConvTranspose2d(32, 1, kernel_size=8, stride=4),
+            nn.Sigmoid(),
+        )
+        
+    def forward(self, x):
+        x = self.fc(x)
+        x = x.view(-1, 64, 7, 7)
+        x = self.deconvnet(x)
+        return x
 
 # ALGO LOGIC: initialize agent here:
-# NOTE: Sharing a CNN encoder between Actor and Critics is not recommended for SAC without stopping actor gradients
-# See the SAC+AE paper https://arxiv.org/abs/1910.01741 for more info
-# TL;DR The actor's gradients mess up the representation when using a joint encoder
-class SoftQNetwork(nn.Module):
+class QNetwork(nn.Module):
     def __init__(self, env, sensory_action_set=None):
         super().__init__()
         if isinstance(env.single_action_space, Discrete):
@@ -143,7 +196,6 @@ class SoftQNetwork(nn.Module):
                 sensory_action_space_size = len(sensory_action_set)
             else:
                 sensory_action_space_size = env.single_action_space["sensory_action"].n
-        
         self.backbone = nn.Sequential(
             nn.Conv2d(4, 32, 8, stride=4),
             nn.ReLU(),
@@ -168,62 +220,6 @@ class SoftQNetwork(nn.Module):
         sensory_action = None
         if self.sensory_action_head:
             sensory_action = self.sensory_action_head(x)
-        return motor_action, sensory_action
-
-
-class Actor(nn.Module):
-    def __init__(self, env, sensory_action_set=None):
-        super().__init__()
-        if isinstance(env.single_action_space, Discrete):
-            motor_action_space_size = env.single_action_space.n
-            sensory_action_space_size = None
-        elif isinstance(env.single_action_space, Dict):
-            motor_action_space_size = env.single_action_space["motor_action"].n
-            if sensory_action_set is not None:
-                sensory_action_space_size = len(sensory_action_set)
-            else:
-                sensory_action_space_size = env.single_action_space["sensory_action"].n
-        
-        self.backbone = nn.Sequential(
-            nn.Conv2d(4, 32, 8, stride=4),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, 4, stride=2),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, stride=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(3136, 512),
-            nn.ReLU(),
-        )
-
-        self.motor_action_head = nn.Linear(512, motor_action_space_size)
-        self.sensory_action_head = None
-        if sensory_action_space_size is not None:
-            self.sensory_action_head = nn.Linear(512, sensory_action_space_size)
-
-    def forward(self, x):
-        x = self.backbone(x)
-        motor_action_logits = self.motor_action_head(x)
-        sensory_action_logits = None
-        if self.sensory_action_head:
-            sensory_action_logits = self.sensory_action_head(x)
-
-        return motor_action_logits, sensory_action_logits
-
-    def get_action_from_logits(self, logits) -> dict:
-        policy_dist = Categorical(logits=logits)
-        action = policy_dist.sample()
-        # Action probabilities for calculating the adapted soft-Q loss
-        action_probs = policy_dist.probs
-        log_prob = F.log_softmax(logits, dim=1)
-        return {"action": action, 
-                "log_prob": log_prob, 
-                "action_probs": action_probs}
-
-    def get_action(self, x):
-        motor_action_logits, sensory_action_logits = self(x)
-        motor_action = self.get_action_from_logits(motor_action_logits)
-        sensory_action = self.get_action_from_logits(sensory_action_logits)
         return motor_action, sensory_action
 
 class SelfPredictionNetwork(nn.Module):
@@ -267,6 +263,11 @@ class SelfPredictionNetwork(nn.Module):
         return x
 
 
+def linear_schedule(start_e: float, end_e: float, duration: int, t: int):
+    slope = (end_e - start_e) / duration
+    return max(slope * t + start_e, end_e)
+
+
 if __name__ == "__main__":
     args = parse_args()
     args.env = args.env.lower()
@@ -275,6 +276,15 @@ if __name__ == "__main__":
     if not os.path.exists(run_dir):
         os.makedirs(run_dir, exist_ok=True)
     
+    
+    wandb.init(
+    project="Dqn_atari_sugarl", 
+    name=f"Atrai-{args.env}_Seed-{args.seed}",
+    entity="hails", 
+    config=args,
+    reinit=True
+    )
+
     writer = SummaryWriter(os.path.join(run_dir, run_name))
     writer.add_text(
         "hyperparameters",
@@ -283,6 +293,7 @@ if __name__ == "__main__":
 
     # TRY NOT TO MODIFY: seeding
     seed_everything(args.seed)
+
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
@@ -301,7 +312,7 @@ if __name__ == "__main__":
     envs = gym.vector.SyncVectorEnv(envs)
 
     sugarl_r_scale = get_sugarl_reward_scale_atari(args.env)
-    
+
     resize = Resize((84, 84))
 
     # get a discrete observ action space
@@ -313,37 +324,13 @@ if __name__ == "__main__":
     sensory_action_y_set = list(range(0, observ_y_max, sensory_action_step[1]))[:args.sensory_action_y_size]
     sensory_action_set = [np.array(a) for a in list(product(sensory_action_x_set, sensory_action_y_set))]
 
-    actor = Actor(envs, sensory_action_set=sensory_action_set).to(device)
-    qf1 = SoftQNetwork(envs, sensory_action_set=sensory_action_set).to(device)
-    qf2 = SoftQNetwork(envs, sensory_action_set=sensory_action_set).to(device)
-    qf1_target = SoftQNetwork(envs, sensory_action_set=sensory_action_set).to(device)
-    qf2_target = SoftQNetwork(envs, sensory_action_set=sensory_action_set).to(device)
-    qf1_target.load_state_dict(qf1.state_dict())
-    qf2_target.load_state_dict(qf2.state_dict())
-    # TRY NOT TO MODIFY: eps=1e-4 increases numerical stability
-    q_optimizer = optim.Adam(list(qf1.parameters()) + list(qf2.parameters()), lr=args.q_lr, eps=1e-4)
-    actor_optimizer = optim.Adam(list(actor.parameters()), lr=args.policy_lr, eps=1e-4)
-
-    # Automatic entropy tuning
-    if args.autotune:
-        motor_target_entropy = -args.motor_target_entropy_scale * torch.log(1 / torch.tensor(envs.single_action_space["motor_action"].n))
-        motor_log_alpha = torch.zeros(1, requires_grad=True, device=device)
-        motor_alpha = motor_log_alpha.exp().item()
-        motor_a_optimizer = optim.Adam([motor_log_alpha], lr=args.q_lr, eps=1e-4)
-    else:
-        motor_alpha = args.alpha
-
-
-    if args.sensory_alpha_autotune:
-        sensory_target_entropy = -args.sensory_target_entropy_scale * torch.log(1 / torch.tensor(len(sensory_action_set)))
-        sensory_log_alpha = torch.zeros(1, requires_grad=True, device=device)
-        sensory_alpha = sensory_log_alpha.exp().item()
-        sensory_a_optimizer = optim.Adam([sensory_log_alpha], lr=args.q_lr, eps=1e-4)
-    else:
-        sensory_alpha = args.alpha
+    q_network = QNetwork(envs, sensory_action_set=sensory_action_set).to(device)
+    optimizer = optim.Adam(q_network.parameters(), lr=args.learning_rate)
+    target_network = QNetwork(envs, sensory_action_set=sensory_action_set).to(device)
+    target_network.load_state_dict(q_network.state_dict())
 
     sfn = SelfPredictionNetwork(envs, sensory_action_set=sensory_action_set).to(device)
-    sfn_optimizer = optim.Adam(sfn.parameters(), lr=args.policy_lr)
+    sfn_optimizer = optim.Adam(sfn.parameters(), lr=args.learning_rate)
 
     rb = DoubleActionReplayBuffer(
         args.buffer_size,
@@ -355,29 +342,83 @@ if __name__ == "__main__":
         optimize_memory_usage=True,
         handle_timeout_termination=False,
     )
-
     start_time = time.time()
 
     # TRY NOT TO MODIFY: start the game
+    # (1, Frame, 84, 84)
     obs, infos = envs.reset()
+    obs_buffer = deque([], maxlen=args.pvm_stack)
+    obs_buffer.append(obs)
+
+    atari_Encoder = Encoder(obs.shape).to(device)
+    atari_Decoder = Decoder(512).to(device)
+    pred_frame_parameters = list(atari_Encoder.parameters()) + list(atari_Decoder.parameters())
+    pred_frame_optimizer = torch.optim.Adam(pred_frame_parameters, lr=0.001)
+    
+    # (1, T, 5, 84, 84)
+    obs_to_LSTM = np.stack(obs_buffer, axis = 1)
+    obs_latent = atari_Encoder(torch.tensor(obs_to_LSTM).to(device))
+    
+    # (1, 1, 84, 84)
+    new_frame = atari_Decoder(obs_latent)
+    output_LSTM = new_frame.detach().cpu().numpy()
+
+    # (1, 5, 84, 84) -> (1, 4, 84, 84)
+    obs = obs[:, 1:, :, :]
+    
+    # (1, 5, 84, 84)
+    new_obs = np.concatenate((obs, output_LSTM), axis=1)
+
     global_transitions = 0
     pvm_buffer = PVMBuffer(args.pvm_stack, (envs.num_envs, args.frame_stack,)+OBSERVATION_SIZE)
+
     while global_transitions < args.total_timesteps:
-        pvm_buffer.append(obs)
-        pvm_obs = pvm_buffer.get_obs(mode="stack_max")
+    
+        if global_transitions == 0: # init
+            pvm_buffer.append(new_obs)
+            pvm_obs = pvm_buffer.get_obs(mode="stack_max")
+
+        elif global_transitions > 0: # after init
+            LSTM_buffer = deque([], maxlen=args.pvm_stack)
+            
+            # after one-step obs == next_obs
+            # (1, 5, 84, 84)
+            LSTM_buffer.append(obs)
+
+            # (1, T, 4, 84, 84)
+            new_LSTM_obs = np.stack((LSTM_buffer), axis = 1)
+            pred_latent = atari_Encoder(torch.tensor(new_LSTM_obs).to(device))
+
+            # (1, 1, 84, 84)
+            pred_frame = atari_Decoder(pred_latent)
+            detached_pred_frame = pred_frame.detach().cpu().numpy()
+            
+            # crop first frame
+            # (1, 5, 84, 84) -> (1, 4, 84, 84)
+            obs = obs[:, 1:, : , :]
+            
+            # concat with pred_frame
+            # (1, 5, 84, 84)
+            new_obs = np.concatenate((obs, detached_pred_frame), axis = 1)           
+            pvm_buffer.append(new_obs)
+            pvm_obs = pvm_buffer.get_obs(mode="stack_max")
+
         # ALGO LOGIC: put action logic here
-        if global_transitions < args.learning_starts:
+        epsilon = linear_schedule(args.start_e, args.end_e, args.exploration_fraction * args.total_timesteps, global_transitions)
+        if random.random() < epsilon:
             actions = np.array([envs.single_action_space.sample() for _ in range(envs.num_envs)])
             motor_actions = np.array([actions[0]["motor_action"]])
             sensory_actions = np.array([random.randint(0, len(sensory_action_set)-1)])
         else:
-            motor_actions_pack, sensory_actions_pack = actor.get_action(resize(torch.from_numpy(pvm_obs)).to(device))
-            motor_actions = motor_actions_pack["action"].detach().cpu().numpy()
-            sensory_actions = sensory_actions_pack["action"].detach().cpu().numpy()
+            motor_q_values, sensory_q_values = q_network(resize(torch.from_numpy(pvm_obs)).to(device))
+            motor_actions = torch.argmax(motor_q_values, dim=1).cpu().numpy()
+            sensory_actions = torch.argmax(sensory_q_values, dim=1).cpu().numpy()
 
         # TRY NOT TO MODIFY: execute the game and log data.
+        # next_obs.shape == (1, 5, 84, 84)
         next_obs, rewards, dones, _, infos = envs.step({"motor_action": motor_actions, 
                         "sensory_action": [sensory_action_set[a] for a in  sensory_actions] })
+        # print (global_step, infos)
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         if "final_info" in infos:
@@ -386,8 +427,14 @@ if __name__ == "__main__":
                     print(f"[T: {time.time()-start_time:.2f}]  [N: {global_transitions:07,d}]  [R: {infos['final_info'][idx]['reward']:.2f}]")
                     writer.add_scalar("charts/episodic_return", infos['final_info'][idx]["reward"], global_transitions)
                     writer.add_scalar("charts/episodic_length", infos['final_info'][idx]["ep_len"], global_transitions)
+                    writer.add_scalar("charts/epsilon", epsilon, global_transitions)
+                
+                    wandb.log({
+                        f"charts/episodic_return": infos['final_info'][idx]["reward"],
+                        f"charts/episodic_length": infos['final_info'][idx]["ep_len"]
+                    }, step=global_transitions)
                     break
-
+        
         # TRY NOT TO MODIFY: save data to reply buffer; handle `terminal_observation`
         real_next_obs = next_obs
         for idx, d in enumerate(dones):
@@ -408,10 +455,17 @@ if __name__ == "__main__":
 
         if global_transitions < args.batch_size:
             continue
-
-        # ALGO LOGIC: training.
+        
         # Training
         if global_transitions % args.train_frequency == 0:
+
+            obs = torch.tensor(obs).to(device)
+            # get loss pred_frame, GT_next_obs
+            # pred_frame.shape == (1, 1, 84, 84)
+            pred_frame_loss = F.mse_loss(pred_frame, obs[:, -1: , :, :])
+            pred_frame_optimizer.zero_grad()
+            pred_frame_loss.backward()
+            pred_frame_optimizer.step()            
             data = rb.sample(args.batch_size // args.env_num) # counter-balance the true global transitions used for training
 
             # sfn learning
@@ -424,108 +478,65 @@ if __name__ == "__main__":
             sfn_optimizer.step()
             observ_r = F.softmax(pred_motor_actions).gather(1, data.motor_actions).squeeze().detach() # 0-1
 
+            # Q network learning
             if global_transitions > args.learning_starts:
-                # CRITIC training
                 with torch.no_grad():
-                    motor_actions_pack, sensory_actions_pack = actor.get_action(data.next_observations)
-                    motor_next_state_log_pi = motor_actions_pack["log_prob"]
-                    motor_next_state_action_probs = motor_actions_pack["action_probs"]
-                    sensory_next_state_log_pi = sensory_actions_pack["log_prob"]
-                    sensory_next_state_action_probs = sensory_actions_pack["action_probs"]
-                    # _, next_state_log_pi, next_state_action_probs = actor.get_action(data.next_observations)
-                    motor_qf1_next_target, sensory_qf1_next_target = qf1_target(data.next_observations)
-                    motor_qf2_next_target, sensory_qf2_next_target = qf2_target(data.next_observations)
-                    # we can use the action probabilities instead of MC sampling to estimate the expectation
-                    motor_min_qf_next_target = motor_next_state_action_probs * (
-                        torch.min(motor_qf1_next_target, motor_qf2_next_target) - motor_alpha * motor_next_state_log_pi
-                    )
-                    sensory_min_qf_next_target = sensory_next_state_action_probs * (
-                        torch.min(sensory_qf1_next_target, sensory_qf2_next_target) - sensory_alpha * sensory_next_state_log_pi
-                    )
-                    # adapt Q-target for discrete Q-function
-                    motor_min_qf_next_target = motor_min_qf_next_target.sum(dim=1)
-                    sensory_min_qf_next_target = sensory_min_qf_next_target.sum(dim=1)
-                    next_q_value = data.rewards.flatten() - (1 - observ_r) * sugarl_r_scale + (1 - data.dones.flatten()) * args.gamma * (motor_min_qf_next_target + sensory_min_qf_next_target)
+                    motor_target, sensory_target = target_network(resize(data.next_observations))
+                    motor_target_max, _ = motor_target.max(dim=1)
+                    sensory_target_max, _ = sensory_target.max(dim=1)
+                    # scale step-wise reward with observ_r
+                    observ_r_adjusted = observ_r.clone()
+                    observ_r_adjusted[data.rewards.flatten() > 0] = 1 - observ_r_adjusted[data.rewards.flatten() > 0]
+                    td_target = data.rewards.flatten() - (1 - observ_r) * sugarl_r_scale + args.gamma * (motor_target_max+sensory_target_max) * (1 - data.dones.flatten())
+                    original_td_target = data.rewards.flatten() + args.gamma * (motor_target_max+sensory_target_max) * (1 - data.dones.flatten())
 
-                # use Q-values only for the taken actions
-                motor_qf1_values, sensory_qf1_values = qf1(data.observations)
-                motor_qf2_values, sensory_qf2_values = qf2(data.observations)
-                motor_qf1_a_values = motor_qf1_values.gather(1, data.motor_actions.long()).view(-1)
-                motor_qf2_a_values = motor_qf2_values.gather(1, data.motor_actions.long()).view(-1)
-                sensory_qf1_a_values = sensory_qf1_values.gather(1, data.sensory_actions.long()).view(-1)
-                sensory_qf2_a_values = sensory_qf2_values.gather(1, data.sensory_actions.long()).view(-1)
-                qf1_loss = F.mse_loss(motor_qf1_a_values+sensory_qf1_a_values, next_q_value)
-                qf2_loss = F.mse_loss(motor_qf2_a_values+sensory_qf2_a_values, next_q_value)
-                qf_loss = qf1_loss + qf2_loss
-
-                q_optimizer.zero_grad()
-                qf_loss.backward()
-                q_optimizer.step()
-
-                # ACTOR training
-                motor_actions_pack, sensory_actions_pack = actor.get_action(data.observations)
-                motor_log_pi = motor_actions_pack["log_prob"]
-                motor_action_probs = motor_actions_pack["action_probs"]
-                sensory_log_pi = sensory_actions_pack["log_prob"]
-                sensory_action_probs = sensory_actions_pack["action_probs"]
-                with torch.no_grad():
-                    motor_qf1_values, sensory_qf1_values = qf1(data.observations)
-                    motor_qf2_values, sensory_qf2_values = qf2(data.observations)
-                    motor_min_qf_values = torch.min(motor_qf1_values, motor_qf2_values)
-                    sensory_min_qf_values = torch.min(sensory_qf1_values, sensory_qf2_values)
-                # no need for reparameterization, the expectation can be calculated for discrete actions
-                motor_actor_loss = (motor_action_probs * ((motor_alpha * motor_log_pi) - motor_min_qf_values)).mean()
-                sensory_actor_loss = (sensory_action_probs * ((sensory_alpha * sensory_log_pi) - sensory_min_qf_values)).mean()
-                actor_loss = motor_actor_loss + sensory_actor_loss
-
-                actor_optimizer.zero_grad()
-                actor_loss.backward()
-                actor_optimizer.step()
-
-                if args.autotune:
-                    # re-use action probabilities for temperature loss
-                    motor_alpha_loss = (motor_action_probs.detach() * (-motor_log_alpha * (motor_log_pi + motor_target_entropy).detach())).mean()
-                    motor_a_optimizer.zero_grad()
-                    motor_alpha_loss.backward()
-                    motor_a_optimizer.step()
-                    motor_alpha = motor_log_alpha.exp().item()
-
-                if args.sensory_alpha_autotune:
-                    sensory_alpha_loss = (sensory_action_probs.detach() * (-sensory_log_alpha * (sensory_log_pi + sensory_target_entropy).detach())).mean()
-                    sensory_a_optimizer.zero_grad()
-                    sensory_alpha_loss.backward()
-                    sensory_a_optimizer.step()
-                    sensory_alpha = sensory_log_alpha.exp().item()
-
-                # update the target networks
-                if global_transitions % args.target_network_frequency == 0:
-                    for param, target_param in zip(qf1.parameters(), qf1_target.parameters()):
-                        target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
-                    for param, target_param in zip(qf2.parameters(), qf2_target.parameters()):
-                        target_param.data.copy_(args.tau * param.data + (1 - args.tau) * target_param.data)
+                old_motor_q_val, old_sensory_q_val = q_network(resize(data.observations))
+                old_motor_val = old_motor_q_val.gather(1, data.motor_actions).squeeze()
+                old_sensory_val = old_sensory_q_val.gather(1, data.sensory_actions).squeeze()
+                old_val = old_motor_val + old_sensory_val
+                
+                loss = F.mse_loss(td_target, old_val)
 
                 if global_transitions % 100 == 0:
-                    # writer.add_scalar("losses/qf1_values", qf1_a_values.mean().item(), global_transitions)
-                    # writer.add_scalar("losses/qf2_values", qf2_a_values.mean().item(), global_transitions)
-                    writer.add_scalar("losses/qf1_loss", qf1_loss.item(), global_transitions)
-                    writer.add_scalar("losses/qf2_loss", qf2_loss.item(), global_transitions)
-                    writer.add_scalar("losses/qf_loss", qf_loss.item() / 2.0, global_transitions)
-                    writer.add_scalar("losses/actor_loss", actor_loss.item(), global_transitions)
-                    writer.add_scalar("losses/motor_alpha", motor_alpha, global_transitions)
-                    writer.add_scalar("losses/sensory_alpha", sensory_alpha, global_transitions)
-                    # print("SPS:", int(global_transitions / (time.time() - start_time)))
+                    writer.add_scalar("losses/td_loss", loss, global_transitions)
+                    writer.add_scalar("losses/q_values", old_val.mean().item(), global_transitions)
+                    writer.add_scalar("losses/motor_q_values", old_motor_val.mean().item(), global_transitions)
+                    writer.add_scalar("losses/sensor_q_values", old_sensory_val.mean().item(), global_transitions)
+                    # print("SPS:", int(global_step / (time.time() - start_time)))
                     writer.add_scalar("charts/SPS", int(global_transitions / (time.time() - start_time)), global_transitions)
-                    if args.autotune:
-                        writer.add_scalar("losses/motor_alpha_loss", motor_alpha_loss.item(), global_transitions)
-                    if args.sensory_alpha_autotune:
-                        writer.add_scalar("losses/sensory_alpha_loss", sensory_alpha_loss.item(), global_transitions)
+
+                    writer.add_scalar("losses/sfn_loss", sfn_loss.item(), global_transitions)
+                    writer.add_scalar("losses/observ_r", observ_r.mean().item(), global_transitions)
+                    writer.add_scalar("losses/original_td_target", original_td_target.mean().item(), global_transitions)
+                    writer.add_scalar("losses/sugarl_r_scaled_td_target", td_target.mean().item(), global_transitions)
+                    writer.add_scalar("losses/LSTM_loss", pred_frame_loss, global_transitions)
+
+                    wandb.log({
+                        "losses/td_loss": loss.item(),
+                        "losses/q_values": old_val.mean().item(),
+                        "losses/motor_q_values": old_motor_val.mean().item(),
+                        "losses/sensor_q_values": old_sensory_val.mean().item(),
+                        "losses/sfn_loss": sfn_loss.item(),
+                        "losses/observ_r": observ_r.mean().item(),
+                        "losses/LSTM_loss": pred_frame_loss,
+                        "charts/SPS": int(global_transitions / (time.time() - start_time)),
+                        "losses/original_td_target": original_td_target.mean().item(),
+                        "losses/sugarl_r_scaled_td_target": td_target.mean().item()
+                    }, step=global_transitions)
+
+                # optimize the model
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+            # update the target network
+            if (global_transitions // args.env_num) % args.target_network_frequency == 0:
+                target_network.load_state_dict(q_network.state_dict())
 
             # evaluation
             if (global_transitions % args.eval_frequency == 0 and args.eval_frequency > 0) or \
                (global_transitions >= args.total_timesteps):
-                qf1.eval()
-                qf2.eval()
-                actor.eval()
+                q_network.eval()
                 sfn.eval()
                 
                 eval_episodic_returns, eval_episodic_lengths = [], []
@@ -542,18 +553,18 @@ if __name__ == "__main__":
                             training=False,
                             record=args.capture_video)]
                     eval_env = gym.vector.SyncVectorEnv(eval_env)
-                    obs, infos = eval_env.reset()
+                    obs_eval, _ = eval_env.reset()
                     done = False
-                    pvm_buffer = PVMBuffer(args.pvm_stack, (eval_env.num_envs, args.frame_stack,)+OBSERVATION_SIZE)
+                    pvm_buffer_eval = PVMBuffer(args.pvm_stack, (eval_env.num_envs, args.frame_stack,)+OBSERVATION_SIZE)
                     while not done:
-                        pvm_buffer.append(obs)
-                        pvm_obs = pvm_buffer.get_obs(mode="stack_max")
-                        motor_actions_pack, sensory_actions_pack = actor.get_action(resize(torch.from_numpy(pvm_obs)).to(device))
-                        motor_actions = motor_actions_pack["action"].detach().cpu().numpy()
-                        sensory_actions = sensory_actions_pack["action"].detach().cpu().numpy()
-                        next_obs, rewards, dones, _, infos = eval_env.step({"motor_action": motor_actions, 
-                                                "sensory_action": [sensory_action_set[a] for a in  sensory_actions] })
-                        obs = next_obs
+                        pvm_buffer_eval.append(obs_eval)
+                        pvm_obs_eval = pvm_buffer_eval.get_obs(mode="stack_max")
+                        motor_q_values, sensory_q_values = q_network(resize(torch.from_numpy(pvm_obs_eval)).to(device))
+                        motor_actions = torch.argmax(motor_q_values, dim=1).cpu().numpy()
+                        sensory_actions = torch.argmax(sensory_q_values, dim=1).cpu().numpy()
+                        next_obs_eval, rewards, dones, _, infos = eval_env.step({"motor_action": motor_actions, 
+                                                                            "sensory_action": [sensory_action_set[a] for a in sensory_actions]})
+                        obs_eval = next_obs_eval
                         done = dones[0]
                         if done:
                             eval_episodic_returns.append(infos['final_info'][0]["reward"])
@@ -567,20 +578,26 @@ if __name__ == "__main__":
                                     model_file_dir = os.path.join("trained_models", args.exp_name, os.path.basename(__file__).rstrip(".py"), args.env)
                                     os.makedirs(model_file_dir, exist_ok=True)
                                     model_fn = f"{args.env}_seed{args.seed}_step{global_transitions:07d}_model.pt"
-                                    torch.save({"sfn": sfn.state_dict(), "qf1": qf1.state_dict(), "qf2": qf2.state_dict(), "actor": actor.state_dict()}, os.path.join(model_file_dir, model_fn))
+                                    torch.save({"sfn": sfn.state_dict(), "q": q_network.state_dict()}, os.path.join(model_file_dir, model_fn))
+                                
 
                 writer.add_scalar("charts/eval_episodic_return", np.mean(eval_episodic_returns), global_transitions)
                 writer.add_scalar("charts/eval_episodic_return_std", np.std(eval_episodic_returns), global_transitions)
                 # writer.add_scalar("charts/eval_episodic_length", np.mean(), global_transitions)
                 print(f"[T: {time.time()-start_time:.2f}]  [N: {global_transitions:07,d}]  [Eval R: {np.mean(eval_episodic_returns):.2f}+/-{np.std(eval_episodic_returns):.2f}] [R list: {','.join([str(r) for r in eval_episodic_returns])}]")
 
-                qf1.train()
-                qf2.train()
-                actor.train()
-                sfn.train()
+                wandb.log({
+                    "charts/eval_episodic_return": np.mean(eval_episodic_returns),
+                    "charts/eval_episodic_return_std": np.std(eval_episodic_returns)
+                }, step=global_transitions)
+                writer.add_scalar("charts/eval_episodic_length", np.mean(), global_transitions)
 
+                q_network.train()
+                sfn.train()
+        
         obs = obs_backup # restore obs if eval occurs
 
     envs.close()
     eval_env.close()
     writer.close()
+    wandb.finish()
