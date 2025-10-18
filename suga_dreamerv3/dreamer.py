@@ -279,15 +279,30 @@ def main(config):
     if not config.offline_traindir:
         prefill = max(0, config.prefill - count_steps(config.traindir))
         print(f"Prefill dataset ({prefill} steps).")
+        acts.discrete = True
+
+        if hasattr(acts, "discrete"):
+            random_actor = tools.OneHotDist(
+                torch.zeros(config.num_actions).repeat(config.envs, 1)
+            )
+        else:
+            random_actor = torchd.independent.Independent(
+                torchd.uniform.Uniform(
+                    torch.tensor(acts.low).repeat(config.envs, 1),
+                    torch.tensor(acts.high).repeat(config.envs, 1),
+                ),
+                1,
+            )
         
         def random_agent(o, d, s):
-            motor_action = train_envs[0].action_space['motor_action'].sample()
+            motor_action = random_actor.sample()
             sensory_action = random.choice(sensory_action_set)
             
             action = OrderedDict([
                 ('motor_action', motor_action),
                 ('sensory_action', sensory_action)
             ])
+            
             num_motor_actions = train_envs[0].action_space['motor_action'].n
             num_sensory_actions = len(sensory_action_set)
             logprob = -np.log(num_motor_actions * num_sensory_actions)
@@ -303,10 +318,12 @@ def main(config):
             limit=config.dataset_size,
             steps=prefill,
         )
+        
         logger.step += prefill * config.action_repeat
         print(f"Logger: ({logger.step} steps).")
 
     print("Simulate agent.")
+
     train_dataset = make_dataset(train_eps, config)
     eval_dataset = make_dataset(eval_eps, config)
     
@@ -317,6 +334,7 @@ def main(config):
         logger,
         train_dataset,
     ).to(config.device)
+
     agent.requires_grad_(requires_grad=False)
     if (logdir / "latest.pt").exists():
         checkpoint = torch.load(logdir / "latest.pt")
@@ -367,7 +385,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs_path = Path("/home/hail/SH/sugarl/suga_dreamerv3/configs.yaml")
+    configs_path = Path("/home/hail/pan/sugarl_dreamer/suga_dreamerv3/configs.yaml")
     configs = yaml.safe_load(configs_path.read_text())
 
     def recursive_update(base, update):

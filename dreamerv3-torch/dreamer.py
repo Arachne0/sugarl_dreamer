@@ -206,7 +206,6 @@ def make_env(config, mode, id):
         env = wrappers.RewardObs(env)
     return env
 
-
 def main(config):
     tools.set_seed_everywhere(config.seed)
     if config.deterministic_run:
@@ -241,12 +240,14 @@ def main(config):
     make = lambda mode, id: make_env(config, mode, id)
     train_envs = [make("train", i) for i in range(config.envs)]
     eval_envs = [make("eval", i) for i in range(config.envs)]
+
     if config.parallel:
         train_envs = [Parallel(env, "process") for env in train_envs]
         eval_envs = [Parallel(env, "process") for env in eval_envs]
     else:
         train_envs = [Damy(env) for env in train_envs]
         eval_envs = [Damy(env) for env in eval_envs]
+
     acts = train_envs[0].action_space
     print("Action Space", acts)
     config.num_actions = acts.n if hasattr(acts, "n") else acts.shape[0]
@@ -282,6 +283,7 @@ def main(config):
             limit=config.dataset_size,
             steps=prefill,
         )
+
         logger.step += prefill * config.action_repeat
         print(f"Logger: ({logger.step} steps).")
 
@@ -345,7 +347,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs_path = Path("/home/hail/pan/sugarl_dreamer/dreamerv3-torch/configs.yaml")
+    configs_path = Path("/home/hail/pan/sugarl_dreamer/dreamerv3-torch/configs_dreamer.yaml")
     configs = yaml.safe_load(configs_path.read_text())
 
     def recursive_update(base, update):

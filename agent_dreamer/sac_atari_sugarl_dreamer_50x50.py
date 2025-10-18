@@ -338,7 +338,6 @@ class SelfPredictionNetwork(nn.Module):
     def get_loss(self, x, target) -> torch.Tensor:
         return self.loss(x, target)
         
-
     def forward(self, x):
         x = self.backbone(x)
         x = self.head(x)

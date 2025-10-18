@@ -15,14 +15,16 @@ class TimeLimit(gym.Wrapper):
 
     def step(self, action):
         assert self._step is not None, "Must reset environment."
-        obs, reward, done, info = self.env.step(action)
+        # state, return_reward, done, truncated, info
+        obs, return_reward, done, truncated, info = self.env.step(action)
         self._step += 1
         if self._step >= self._duration:
             done = True
             if "discount" not in info:
                 info["discount"] = np.array(1.0).astype(np.float32)
             self._step = None
-        return obs, reward, done, info
+        obs = {"image":obs, "is_terminal": False, "is_first": True}
+        return obs, return_reward, done, truncated, info
 
     def reset(self):
         self._step = 0
@@ -66,7 +68,9 @@ class OneHotAction(gym.Wrapper):
         self.action_space = action_space
 
     def step(self, action):
+        action = action.item()
         motor_action_onehot = action['motor_action']
+        motor_action_onehot = motor_action_onehot[0].numpy()
         motor_action_index = np.argmax(motor_action_onehot).astype(int)
         reference = np.zeros_like(motor_action_onehot)
         reference[motor_action_index] = 1

@@ -15,7 +15,7 @@ from torch import nn
 from torch.nn import functional as F
 from torch import distributions as torchd
 from torch.utils.tensorboard import SummaryWriter
-
+import copy
 
 to_np = lambda x: x.detach().cpu().numpy()
 
@@ -172,6 +172,7 @@ def simulate(
         reward = [0] * len(envs)
     else:
         step, episode, done, length, obs, agent_state, reward = state
+
     while (steps and step < steps) or (episodes and episode < episodes):
         # reset envs if necessary
         if done.any():
@@ -179,23 +180,33 @@ def simulate(
             results = [envs[i].reset() for i in indices]
             results = [r() for r in results]
             for index, result in zip(indices, results):
-                t = result.copy()
+                result_dict = {}
+                result_dict["image"] = result[0]
+                result_dict["is_terminal"] = False
+                result_dict["is_first"] = True
+                for k, v in result[1].items():
+                    result_dict[k] = v
+
+                t = result_dict.copy()
                 t = {k: convert(v) for k, v in t.items()}
                 # action will be added to transition in add_to_cache
+                t["raw_reward"] = 0.0
                 t["reward"] = 0.0
                 t["discount"] = 1.0
                 # initial state should be added to cache
                 add_to_cache(cache, envs[index].id, t)
                 # replace obs with done by initial state
-                obs[index] = result
+                obs[index] = result_dict
         # step agents
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0] if "log_" not in k}
         action, agent_state = agent(obs, done, agent_state)
         if isinstance(action, dict):
-            action = [
-                {k: np.array(action[k][i].detach().cpu()) for k in action}
-                for i in range(len(envs))
-            ]
+            processed_action_dict = {
+                    k: np.array(v) 
+                    for k, v in action.items()
+                }
+            action = [processed_action_dict]
+
         else:
             action = np.array(action)
         assert len(action) == len(envs)
@@ -212,7 +223,8 @@ def simulate(
         length *= 1 - done
         # add to cache
         for a, result, env in zip(action, results, envs):
-            o, r, d, info = result
+            o, r, d, trancated, info = result
+            # TODO {"image": image, "is_terminal": is_terminal, "is_first": is_first},
             o = {k: convert(v) for k, v in o.items()}
             transition = o.copy()
             if isinstance(a, dict):
@@ -273,7 +285,6 @@ def simulate(
             cache.popitem(last=False)
     return (step - steps, episode - episodes, done, length, obs, agent_state, reward)
 
-
 def add_to_cache(cache, id, transition):
     if id not in cache:
         cache[id] = dict()
@@ -283,10 +294,24 @@ def add_to_cache(cache, id, transition):
         for key, val in transition.items():
             if key not in cache[id]:
                 # fill missing data(action, etc.) at second time
-                cache[id][key] = [convert(0 * val)]
-                cache[id][key].append(convert(val))
+                if key == "action":
+                    value = val.item()
+                    cache[id][key] = [convert(0 * value["motor_action"][0])]
+                    cache[id][key].append(convert(value["motor_action"][0]))
+
+                    cache[id][key] = [convert(0 * value["sensory_action"])]
+                    cache[id][key].append(convert(value["sensory_action"]))
+                else: 
+                    cache[id][key] = [convert(0 * val)]
+                    cache[id][key].append(convert(val))
             else:
-                cache[id][key].append(convert(val))
+                if key == "action":
+                    value = val.item()
+                    cache[id][key].append(convert(value["motor_action"][0]))
+                    cache[id][key].append(convert(value["sensory_action"]))
+                else:
+                    cache[id][key].append(convert(val))
+
 
 
 def erase_over_episodes(cache, dataset_size):

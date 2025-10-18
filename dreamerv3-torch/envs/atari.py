@@ -124,16 +124,17 @@ class Atari:
                 _, _, dead, _ = self._env.step(0)
                 if dead:
                     self._env.reset()
+ 
         self._last_lives = self._ale.lives()
         self._screen(self._buffer[0])
         self._buffer[1].fill(0)
-
         self._done = False
         self._step = 0
         obs, reward, is_terminal, _ = self._obs(0.0, is_first=True)
         return obs
 
     def _obs(self, reward, is_first=False, is_last=False, is_terminal=False):
+
         np.maximum(self._buffer[0], self._buffer[1], out=self._buffer[0])
         image = self._buffer[0]
         if image.shape[:2] != self._size:

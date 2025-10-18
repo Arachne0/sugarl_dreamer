@@ -154,23 +154,26 @@ def simulate(
             results = [envs[i].reset() for i in indices]
             results = [r() for r in results]
             for index, result in zip(indices, results):
-                t = result[0].copy()
+                t = result.copy()
                 t = {k: convert(v) for k, v in t.items()}
                 # action will be added to transition in add_to_cache
+                t["raw_reward"] = 0.0
                 t["reward"] = 0.0
                 t["discount"] = 1.0
                 # initial state should be added to cache
                 add_to_cache(cache, envs[index].id, t)
                 # replace obs with done by initial state
-                obs[index] = result[0]
+                obs[index] = result
         # step agents
         obs = {k: np.stack([o[k] for o in obs]) for k in obs[0] if "log_" not in k}
         action, agent_state = agent(obs, done, agent_state)
+
         if isinstance(action, dict):
             action = [
                 {k: np.array(action[k][i].detach().cpu()) for k in action}
                 for i in range(len(envs))
             ]
+
         else:
             action = np.array(action)
         assert len(action) == len(envs)
