@@ -165,8 +165,6 @@ def make_env(config, mode, id):
         kwargs = vars(config)
         kwargs['game'] = task  
         kwargs['seed'] = config.seed + id
-    
-        pprint.pprint(kwargs)
         
         env_args = AtariEnvArgs(**kwargs)
         env = AtariFixedFovealEnv(env_args)
@@ -295,7 +293,8 @@ def main(config):
             )
         
         def random_agent(o, d, s):
-            motor_action = random_actor.sample()
+            motor_action_t = random_actor.sample()
+            motor_action = motor_action_t.detach().cpu().numpy()
             sensory_action = random.choice(sensory_action_set)
             
             action = OrderedDict([
@@ -385,8 +384,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--configs", nargs="+")
     args, remaining = parser.parse_known_args()
-    configs_path = Path("/home/hail/pan/sugarl_dreamer/suga_dreamerv3/configs.yaml")
-    configs = yaml.safe_load(configs_path.read_text())
+    configs_path = Path("/home/hail/SH/sugarl_dreamer/suga_dreamerv3/configs.yaml")
+    yaml_parser = yaml.YAML(typ='safe', pure=True)
+    configs = yaml_parser.load(configs_path.read_text())   
 
     def recursive_update(base, update):
         for key, value in update.items():

@@ -169,3 +169,5 @@ dmypy.json
 # files
 logdir
 */logdir/*
+
+*copy.py

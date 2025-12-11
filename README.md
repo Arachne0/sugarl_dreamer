@@ -1,50 +1,35 @@
-## ⚠️ Warning ⚠️
+##  Dependency 📦
 
-그냥 clone해서 시작하지 마시고, 이 README.md 전부 읽어보시고 시작해주세요.
-이해가 안되신다면 연락 부탁드려요.
+```bash
+conda create -n suga_dreamer python=3.9 -y
+conda activate suga_dreamer
+pip install "pip<24.1" "setuptools<60.0.0" "wheel<0.40.0"
+pip install -r suga_dreamerv3/requirements.txt --extra-index-url https://download.pytorch.org/whl/cu116
 
-<br>
-
+AutoROM --accept-license
+python -m atari_py.import_roms /home/hail/anaconda3/envs/suga_dreamer/lib/python3.9/site-packages/AutoROM/roms
+```
 
 ###  Working Directory 📁
-git clone 했을 때, 여러 개 폴더가 보이실 텐데 dreamerv3-torch 폴더를 제외한 나머지 폴더는 전부 SUGARL 에서 가져온 거 입니다.
+git clone 했을 때, 여러 개 폴더가 보이실 텐데 dreamerv3-torch 폴더를 제외한 나머지 폴더는 전부 SUGARL 에서 가져왔습니다.
 
 저희가 main으로 해야할 게  "SUGARL에서 Sensory policy 부분을 DreamerV3로 교체하자" 입니다. 
 
-main working directory는 agent_dreamer 폴더이며, agent 는 기존에 SUGARL에 있던 파일들입니다. 
+main working directory는 suga_dreamerv3 폴더입니다.
 
 일단 Atari에서 SAC를 사용했을 때, SUGARL + DreamerV3 가 잘 되는지를 보고자 하는 것이며, 추후에 DMC (2D, 3D로 확장할 예정입니다.)
 
 <br>
 
-### Current Progress (10/1)
-1. Dreamer network issue
-
-원본 코드에서는 image size를 64로 설정했었고, 항상 똑같은 사이즈의 필터 사이즈와 패딩이 적용되도록 했는데 (4장) 우리는 SUGARL의 이미지 사이즈에서 비교해야하기 때문에 84, 84로 수정하는 과정에서 network shape이 맞지 않는 문제가 있었다.
-
-이걸 SUGARL에서의 network를 떼와서 world model의 인코더와 디코더에 붙였다. network 사이즈와 패딩만 없는 그런 차이점만 있을 뿐 다른 차이점은 최대한 동일하게 유지했다.
-
-2. Dreamer image shape issue
-
-원본 Dreamer v3 코드에서는 stack해서 하지 않고 RGB로 했었는데(64, 64, 3), SUGARL에서는 이를 stack해서 쓰기 때문에 Dreamer에서도 stack했을 때 제대로 작동하는 지를 확인할 필요가 있었다. envs/wrappers.py 에다가 Framestack 클래스를 정의하고 wrappers로 감쌌을 때 shape 잘 들어가는 거 확인했다.
-
-3. Future works
-
-이제 SUGARL 에다가 dreamer 합치기만 하면 된다.
+### Current Progress (12/11)
+1. action shape
+처음에 random agent가 아무렇게나 했을 때, 저장된 episode 중 action 의 shape이 중구난방이다. motor 쪽은 환경의 action space에 따라 매번 달라지고 sensory는 x,y 위치로 정해져있다보니 이 둘을 따로 저장해야하지 않을까 하는 생각
 
 <br>
 
 ### Must be fixed 🛠️ 
 
-1. 각각의 gym 버전이 다를 가능성이 매우 높다.
-잠깐 보기엔 active vision RL에서는 gymnasium as gym (version=0.29.1)해서 쓰고, 
-dreamerv3에서는 그냥 gym (version==0.19.0)을 쓴다.  맞는 버전이 있다면 좋겠다만 맞지 않더라도 잘 수정해야한다.
-최대한 잘 정리해서 최대한 딸깍 몇번으로 interpreter 구성할 수 있게 만들어보자/
-
-2. 이젠 진짜 2개 모델 합쳐야 한다.
-
-
-3. dreamer.py 디버깅 중에  지금은 config.task 를 "atari_pong" 으로 configs.yaml에서 고정시켜서 아마 이것만 할텐데 최종적으로는 atari에 대한 모든 환경을 config.task에 자동적으로 넣어서 돌아갈 수 있도록 만들어야 한다. 
+1. dreamer.py 디버깅 중에  지금은 config.task 를 "atari_pong" 으로 configs.yaml에서 고정시켜서 아마 이것만 할텐데 최종적으로는 atari에 대한 모든 환경을 config.task에 자동적으로 넣어서 돌아갈 수 있도록 만들어야 한다. 
 
 
 
@@ -69,48 +54,6 @@ git push origin <your_branch_name>
 
 
 
-##  Dependency 📦
-
-Repo 를 2개를 임의로 붙인거다 보니 중간에 호환안되거나 문제 생기는 점은 update하겠습니다. python 버전은 3.9 입니다. 
-
-- active RL
-```bash
-conda env create -f active_rl_env.yaml
-conda activate arl 
-pip install gymnasium[accept-rom-license]
-AutoROM --accept-license
-```
-
-- Dreamer
-```bash
-sudo apt-get update
-sudo apt-get install unrar
-bash dreamerv3-torch/envs/setup_scripts/atari.sh 
-pip install "gym[atari,accept-rom-license]"
-```
-
-- Dreamer gym problem solved
-```bash
-pip install "pip<24.1"
-pip install "gym==0.19.0"
-sudo apt-get update
-sudo apt-get install build-essential cmake
-conda update libstdcxx-ng
-conda install gxx_linux-64
-mv /home/hail/anaconda3/envs/dreamer/lib/libstdc++.so.6 /home/hail/anaconda3/envs/dreamer/lib/libstdc++.so.6.bak
-pip install gym[atari]
-```
-
-<br>
-
-⚠️ 그대로 yaml 파일 적용시 ROM 경로가 다른데 들어가서 복사해주는 작업이 필요합니다. 밑의 코드를 그대로 복사하면 절대 경로라 에러 발생할 가능성이 매우 높은이 anaconda3 경로 위치 확인하고 하세요. ⚠️
-
-```bash
-python -m atari_py.import_roms /home/hail/anaconda3/envs/arl/lib/python3.9/site-packages/AutoROM/roms
-```
-
-<br>
-
 ### Notes
 
 `scripts/` 안에 있는 scripts는 병렬 처리가 가능하도록, SURAGL 저자들이 shell script로 작성해둔 것입니다.
@@ -125,29 +68,6 @@ main branch로 올라간 첫 버전은 그냥 SUGARL를 wandb에 찍을 수 있�
 
 [PDF Download]({% raw %}_docs{% endraw %}/Active%20Vision%20Reinforcement%20Learning%20under%20Limited%20Vis...pdf)
 
-
-<br>
-
-
-## agent_dreamer launch.json arguments
-- sac_atari_sugarl_dreamer_50x50.py 
-```
-"args": ["--seed", "0",
-        "--exp-name", "atari_100k_50x50",
-        "--fov-size", "50",
-        "--clip-reward",
-        "--capture-video",
-        "--total-timesteps", "1000000",
-        "--buffer-size", "100000",
-        "--learning-starts", "80000"
-    ],
-```
-
-<br>
-
-## DreamerV3
-dreamer v3는 자동적으로 configs.yaml을 읽어오기 때문에 argument 따로 안넣어줘도 됩니다.
-그냥 디버깅 해도 잘 돌아가요
 
 
 <br>
